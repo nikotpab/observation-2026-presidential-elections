@@ -1,0 +1,33 @@
+# Dependencias y cache de Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+.uv/
+
+# Archivos de entorno (contienen configuracion local sensible)
+.env
+
+# Indice de transmision (63 MB — demasiado grande para el repositorio)
+e14_transmission_index_2026.json
+
+# PDFs descargados (volumen masivo, se regeneran con el script)
+actas/
+actas_*/
+*.pdf
+*.tmp
+
+# Log de errores generado en tiempo de ejecucion
+errors.csv
+
+# Artefactos del sistema operativo
+.DS_Store
+Thumbs.db
+
+# Herramientas de analisis y configuracion de IDE
+.serena/
+.claude/
+.idea/
+.vscode/
+*.swp
+*.swo
