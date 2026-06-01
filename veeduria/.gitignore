@@ -1,0 +1,6 @@
+veeduria.db
+reportes/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
