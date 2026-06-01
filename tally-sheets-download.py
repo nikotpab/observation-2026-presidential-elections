@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run
 # /// script
 # dependencies = [
-#   "httpx[http2]",
+#   "curl-cffi",
 #   "tqdm",
 #   "python-dotenv",
 # ]
@@ -21,10 +21,11 @@ Opciones:
     --out DIR           Directorio de salida    (default: OUTPUT_DIR del .env o ./actas)
     --concurrency N     Descargas paralelas     (default: CONCURRENCY del .env o 20)
     --retries N         Reintentos por archivo  (default: RETRIES del .env o 3)
+    --timeout N         Segundos por descarga   (default: TIMEOUT del .env o 120)
     --limit N           Limitar a N registros   (util para pruebas)
     --status N          Filtrar por idTransmissionCodeStatus (ej: 11)
     --errors FILE       Ruta del log de errores (default: ERRORS_FILE del .env o errors.csv)
-    --env FILE          Archivo .env alternativo (default: .env)
+    --from-errors FILE  Re-descargar solo los registros listados en un errors.csv previo
 """
 
 import argparse
@@ -34,19 +35,15 @@ import json
 from pathlib import Path
 from typing import Optional
 
-import httpx
+from curl_cffi.requests import AsyncSession
 from dotenv import dotenv_values
 from tqdm import tqdm
 
 BASE_URL = "https://divulgacione14presidente.registraduria.gov.co/assets/temis/pdf"
 
 HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/125.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/pdf,*/*",
+    "Accept": "*/*",
+    "Accept-Encoding": "gzip, deflate, br",
     "Referer": "https://divulgacione14presidente.registraduria.gov.co/",
 }
 
@@ -91,11 +88,22 @@ def load_records(index_path: str, status_filter: Optional[int]) -> list:
     return records
 
 
+def load_failed_ids(errors_path: str) -> set:
+    """Lee un errors.csv y devuelve el conjunto de idTransmissionCode fallidos."""
+    failed = set()
+    with open(errors_path, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            failed.add(row["idTransmissionCode"])
+    return failed
+
+
 async def download_one(
-    client: httpx.AsyncClient,
+    session: AsyncSession,
     record: dict,
     dest: Path,
     retries: int,
+    timeout: int,
     semaphore: asyncio.Semaphore,
 ) -> tuple:
     """Descarga un PDF. Retorna (exito, mensaje_error)."""
@@ -108,17 +116,16 @@ async def download_one(
     async with semaphore:
         for attempt in range(1, retries + 1):
             try:
-                async with client.stream("GET", url, timeout=20.0) as response:
-                    if response.status_code == 404:
-                        return False, f"404 {url}"
-                    response.raise_for_status()
-                    tmp = dest.with_suffix(".tmp")
-                    with open(tmp, "wb") as fh:
-                        async for chunk in response.aiter_bytes(chunk_size=65536):
-                            fh.write(chunk)
-                    tmp.rename(dest)
-                    return True, None
-            except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+                response = await session.get(url, headers=HEADERS, timeout=timeout)
+                if response.status_code == 404:
+                    return False, f"404 {url}"
+                if response.status_code != 200:
+                    raise Exception(f"HTTP {response.status_code}")
+                tmp = dest.with_suffix(".tmp")
+                tmp.write_bytes(response.content)
+                tmp.rename(dest)
+                return True, None
+            except Exception as exc:
                 if attempt == retries:
                     return False, f"{type(exc).__name__}: {exc}"
                 await asyncio.sleep(2 ** attempt)
@@ -128,7 +135,13 @@ async def download_one(
 
 async def run(args: argparse.Namespace) -> None:
     records = load_records(args.index, args.status)
-    print(f"Registros cargados del indice: {len(records):,}")
+
+    if args.from_errors:
+        failed_ids = load_failed_ids(args.from_errors)
+        records = [r for r in records if r.get("idTransmissionCode") in failed_ids]
+        print(f"Modo reintento: {len(records):,} registros del log de errores '{args.from_errors}'.")
+    else:
+        print(f"Registros cargados del indice: {len(records):,}")
 
     if args.limit:
         records = records[: args.limit]
@@ -141,18 +154,16 @@ async def run(args: argparse.Namespace) -> None:
     errors = []
     counters = {"ok": 0, "skip": 0, "error": 0}
 
-    limits = httpx.Limits(
-        max_connections=args.concurrency + 10,
-        max_keepalive_connections=args.concurrency,
-    )
-    async with httpx.AsyncClient(headers=HEADERS, limits=limits, follow_redirects=True) as client:
+    # impersonate="chrome120" replica el TLS fingerprint exacto de Chrome
+    # para pasar los filtros de bot de Akamai
+    async with AsyncSession(impersonate="chrome120") as session:
 
         async def tracked(record):
             dest = local_path(out_dir, record)
             if dest.exists() and dest.stat().st_size > 0:
                 counters["skip"] += 1
                 return
-            success, err = await download_one(client, record, dest, args.retries, semaphore)
+            success, err = await download_one(session, record, dest, args.retries, args.timeout, semaphore)
             if success:
                 counters["ok"] += 1
             else:
@@ -210,7 +221,20 @@ def main() -> None:
         type=int,
         default=int(env.get("RETRIES", 3)),
     )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=int(env.get("TIMEOUT", 120)),
+        help="Segundos de timeout por descarga (default 120)",
+    )
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument(
+        "--from-errors",
+        dest="from_errors",
+        default=None,
+        metavar="FILE",
+        help="Re-descargar solo los registros listados en un errors.csv previo",
+    )
     parser.add_argument(
         "--status",
         type=int,

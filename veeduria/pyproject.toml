@@ -16,9 +16,6 @@ dependencies = [
     "jinja2>=3.1",
 ]
 
-[project.scripts]
-veeduria = "veeduria.cli:app"
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
