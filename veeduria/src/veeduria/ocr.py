@@ -30,7 +30,11 @@ class LineOCR:
 
 
 def extract_lines(image: Image.Image, langs: list[str] = ["es"]) -> list[LineOCR]:
-    """Runs Surya OCR on an image and returns recognized text lines with bboxes."""
+    """Runs Surya OCR on an image and returns recognized text lines with bboxes.
+
+    langs is accepted for API compatibility but ignored by Surya 0.17.x,
+    which handles language detection internally via its foundation model.
+    """
     det_predictor, rec_predictor = _load_predictors()
 
     results = rec_predictor(
